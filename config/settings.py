@@ -1,3 +1,8 @@
+"""
+Configuration Settings for Multi-Client Chat Application
+Updated with Discord Dark Theme + New Features
+"""
+
 # ==================== SERVER CONFIGURATION ====================
 
 TCP_HOST = '0.0.0.0'
@@ -22,6 +27,7 @@ RECONNECT_DELAY = 2
 
 # ==================== PROTOCOL CONFIGURATION ====================
 
+# Original message types
 MSG_TYPE_TEXT = 'TEXT'
 MSG_TYPE_FILE = 'FILE'
 MSG_TYPE_FILE_CHUNK = 'CHUNK'
@@ -37,7 +43,22 @@ MSG_TYPE_ERROR = 'ERROR'
 MSG_TYPE_FILE_ACK = 'FILE_ACK'
 MSG_TYPE_PROGRESS = 'PROGRESS'
 
+# NEW: Enhanced features
+MSG_TYPE_TYPING_START = 'TYPING_START'
+MSG_TYPE_TYPING_STOP = 'TYPING_STOP'
+MSG_TYPE_STATUS_CHANGE = 'STATUS_CHANGE'
+MSG_TYPE_RECONNECT = 'RECONNECT'
+MSG_TYPE_SESSION_ID = 'SESSION_ID'
+
 MSG_DELIMITER = '<END>'
+
+# User Status Values
+STATUS_ONLINE = 'online'
+STATUS_BUSY = 'busy'
+STATUS_OFFLINE = 'offline'
+
+# Typing indicator timeout (seconds)
+TYPING_TIMEOUT = 3
 
 # ==================== ENCRYPTION CONFIGURATION ====================
 
@@ -48,12 +69,11 @@ CAESAR_SHIFT = 13
 # ==================== FILE TRANSFER CONFIGURATION ====================
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
-CHUNK_SIZE = 8192  # 8KB chunks for smooth progress
+CHUNK_SIZE = 8192  # 8KB chunks
 LARGE_FILE_THRESHOLD = 50 * 1024 * 1024  # 50 MB
 
 ALLOWED_EXTENSIONS = []
 
-# Downloads folder
 DOWNLOADS_FOLDER = 'downloads'
 FILE_TRANSFER_LOG = 'file_transfers.log'
 
@@ -66,26 +86,26 @@ WINDOW_MIN_WIDTH = 700
 WINDOW_MIN_HEIGHT = 500
 
 # Discord Dark Theme Colors
-BG_COLOR = "#36393f"              # Main background (Dark gray)
-SIDEBAR_COLOR = "#2f3136"         # Sidebar background (Darker)
-CHAT_BG_COLOR = "#36393f"         # Chat area background
-INPUT_BG_COLOR = "#40444b"        # Input field background
-TEXT_COLOR = "#ffffff"            # Primary text (White)
-TEXT_SECONDARY = "#b9bbbe"        # Secondary text (Light gray)
-ACCENT_COLOR = "#5865f2"          # Discord Blue
-BUTTON_COLOR = "#5865f2"          # Primary buttons
-BUTTON_HOVER = "#4752c4"          # Button hover
-BUZZ_COLOR = "#ed4245"            # Buzz/Alert (Red)
-SUCCESS_COLOR = "#3ba55d"         # Success messages (Green)
-WARNING_COLOR = "#faa81a"         # Warnings (Orange)
-ERROR_COLOR = "#ed4245"           # Errors (Red)
+BG_COLOR = "#36393f"
+SIDEBAR_COLOR = "#2f3136"
+CHAT_BG_COLOR = "#36393f"
+INPUT_BG_COLOR = "#40444b"
+TEXT_COLOR = "#ffffff"
+TEXT_SECONDARY = "#b9bbbe"
+ACCENT_COLOR = "#5865f2"
+BUTTON_COLOR = "#5865f2"
+BUTTON_HOVER = "#4752c4"
+BUZZ_COLOR = "#ed4245"
+SUCCESS_COLOR = "#3ba55d"
+WARNING_COLOR = "#faa81a"
+ERROR_COLOR = "#ed4245"
 
 # Message Colors
-MSG_COLOR_SELF = "#3ba55d"        # Green for own messages
-MSG_COLOR_OTHERS = "#faa81a"      # Orange for other users
-MSG_COLOR_SERVER = "#5865f2"      # Blue for server messages
-MSG_COLOR_BUZZ = "#ed4245"        # Red for buzz
-MSG_COLOR_FILE = "#00b0f4"        # Cyan for file transfers
+MSG_COLOR_SELF = "#3ba55d"
+MSG_COLOR_OTHERS = "#faa81a"
+MSG_COLOR_SERVER = "#5865f2"
+MSG_COLOR_BUZZ = "#ed4245"
+MSG_COLOR_FILE = "#00b0f4"
 
 # Font Settings
 FONT_FAMILY = "Segoe UI"
@@ -137,6 +157,7 @@ def get_config_summary():
     Max File Size: {MAX_FILE_SIZE / (1024*1024):.0f} MB
     Theme: Discord Dark
     Downloads: {DOWNLOADS_FOLDER}/
+    New Features: Typing, Status, Reconnect
     ===========================================
     """
 
