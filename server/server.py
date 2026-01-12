@@ -49,6 +49,11 @@ class ChatServer:
         # User sessions
         self.user_sessions = {}  # {username: {'socket': socket, 'address': addr, 'login_time': time}}
         
+        # NEW: Enhanced state tracking
+        self.user_status = {}      # {username: 'online'/'busy'/'offline'}
+        self.typing_users = set()  # Set of usernames currently typing
+        self.session_ids = {}      # {username: session_id} for reconnect
+        
         # File transfer tracking
         self.file_transfers = {}  # {username: FileWriter object}
         
@@ -164,8 +169,21 @@ class ChatServer:
                     'address': client_address,
                     'login_time': datetime.now()
                 }
+                
+                # NEW: Set initial status
+                self.user_status[username] = 'online'
+                
+                # NEW: Generate session ID for reconnect
+                import uuid
+                session_id = str(uuid.uuid4())
+                self.session_ids[username] = session_id
             
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ {username} authenticated from {client_address}")
+            
+            # NEW: Send session ID to client
+            from common.protocol import create_session_message
+            session_msg = create_session_message(session_id)
+            self.send_raw(client_socket, session_msg)
             
             # Notify all clients about new user
             join_msg = create_message(MSG_TYPE_USER_JOIN, "SERVER", username)
@@ -313,14 +331,34 @@ class ChatServer:
             self.broadcast_message(raw_message, exclude=username)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} sent a BUZZ")
         
+        # NEW: Typing indicator handlers
+        elif msg_type == 'TYPING_START':
+            with self.clients_lock:
+                self.typing_users.add(username)
+            # Broadcast to others (not back to sender)
+            self.broadcast_message(raw_message, exclude=username)
+        
+        elif msg_type == 'TYPING_STOP':
+            with self.clients_lock:
+                self.typing_users.discard(username)
+            self.broadcast_message(raw_message, exclude=username)
+        
+        # NEW: Status change handler
+        elif msg_type == 'STATUS_CHANGE':
+            new_status = parsed['content']
+            with self.clients_lock:
+                self.user_status[username] = new_status
+            # Broadcast status change to all
+            self.broadcast_message(raw_message)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} is now {new_status}")
+        
         elif msg_type == MSG_TYPE_FILE:
             # Handle file transfer initiation
-            # In this simplified version, forward file info to all clients
             self.broadcast_message(raw_message, exclude=username)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} initiated file transfer: {parsed['content']}")
         
         elif msg_type == MSG_TYPE_FILE_CHUNK:
-            # Forward file chunk (this is simplified - production would buffer)
+            # Forward file chunk
             self.broadcast_raw(raw_message.encode('utf-8'), exclude=username)
     
     def broadcast_message(self, message: str, exclude: str = None):
@@ -394,15 +432,25 @@ class ChatServer:
     
     def send_user_list(self, username: str):
         """
-        Send list of online users to specific client.
+        Send list of online users with their status to specific client.
         
         Args:
             username (str): Target username
         """
         with self.clients_lock:
-            online_users = list(self.clients.keys())
+            # NEW: Include status information
+            user_data = []
+            for user in self.clients.keys():
+                status = self.user_status.get(user, 'online')
+                user_data.append({
+                    'username': user,
+                    'status': status,
+                    'typing': user in self.typing_users
+                })
         
-        user_list_msg = create_user_list_message(online_users)
+        import json
+        user_list_json = json.dumps(user_data)
+        user_list_msg = f"USER_LIST|SERVER|{user_list_json}<END>"
         self.send_to_client(username, user_list_msg)
     
     def remove_client(self, username: str):
@@ -417,6 +465,10 @@ class ChatServer:
                 del self.clients[username]
             if username in self.user_sessions:
                 del self.user_sessions[username]
+            # NEW: Clean up status tracking
+            if username in self.user_status:
+                self.user_status[username] = 'offline'
+            self.typing_users.discard(username)
     
     def get_server_stats(self) -> dict:
         """
