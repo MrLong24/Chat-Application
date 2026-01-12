@@ -1,3 +1,18 @@
+"""
+Protocol Module for Multi-Client Chat Application
+
+This module defines the application-layer protocol for message formatting,
+parsing, and handling. It ensures consistent communication between clients and server.
+
+Protocol Format:
+    TYPE|SENDER|CONTENT<END>
+
+Example Messages:
+    TEXT|alice|Hello everyone!<END>
+    FILE|bob|document.pdf|1024|<binary_data><END>
+    BUZZ|charlie||<END>
+"""
+
 import json
 import sys
 import os
@@ -6,10 +21,12 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import (
-    MSG_TYPE_FILE_COMPLETE, MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ,
+    MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ,
     MSG_TYPE_USER_JOIN, MSG_TYPE_USER_LEAVE, MSG_TYPE_USER_LIST,
     MSG_TYPE_AUTH, MSG_TYPE_AUTH_OK, MSG_TYPE_AUTH_FAIL,
-    MSG_TYPE_ERROR, MSG_DELIMITER, MSG_TYPE_FILE_CHUNK
+    MSG_TYPE_ERROR, MSG_DELIMITER, MSG_TYPE_FILE_CHUNK,
+    MSG_TYPE_FILE_COMPLETE, MSG_TYPE_TYPING_START, MSG_TYPE_TYPING_STOP,
+    MSG_TYPE_STATUS_CHANGE, MSG_TYPE_RECONNECT, MSG_TYPE_SESSION_ID
 )
 
 
@@ -142,7 +159,7 @@ def create_user_list_message(users: list) -> str:
     Create a user list message.
     
     Args:
-        users (list): List of online usernames
+        users (list): List of online usernames or user data dicts
     
     Returns:
         str: Formatted user list message
@@ -162,6 +179,63 @@ def create_error_message(error_text: str) -> str:
         str: Formatted error message
     """
     return create_message(MSG_TYPE_ERROR, "SERVER", error_text)
+
+
+def create_typing_message(username: str, is_typing: bool) -> str:
+    """
+    Create typing indicator message.
+    
+    Args:
+        username (str): User who is typing
+        is_typing (bool): True for start, False for stop
+    
+    Returns:
+        str: Formatted message
+    """
+    msg_type = MSG_TYPE_TYPING_START if is_typing else MSG_TYPE_TYPING_STOP
+    return create_message(msg_type, username, "")
+
+
+def create_status_message(username: str, status: str) -> str:
+    """
+    Create user status change message.
+    
+    Args:
+        username (str): User changing status
+        status (str): New status (online, busy, offline)
+    
+    Returns:
+        str: Formatted message
+    """
+    return create_message(MSG_TYPE_STATUS_CHANGE, username, status)
+
+
+def create_reconnect_message(username: str, session_id: str) -> str:
+    """
+    Create reconnect request message.
+    
+    Args:
+        username (str): User attempting to reconnect
+        session_id (str): Previous session identifier
+    
+    Returns:
+        str: Formatted message
+    """
+    data = json.dumps({"username": username, "session_id": session_id})
+    return create_message(MSG_TYPE_RECONNECT, username, data)
+
+
+def create_session_message(session_id: str) -> str:
+    """
+    Create session ID message.
+    
+    Args:
+        session_id (str): Session identifier
+    
+    Returns:
+        str: Formatted message
+    """
+    return create_message(MSG_TYPE_SESSION_ID, "SERVER", session_id)
 
 
 # ==================== MESSAGE PARSING ====================
@@ -471,6 +545,7 @@ def test_protocol():
     print("\n" + "=" * 50)
     print("✓ All tests completed")
     print("=" * 50)
+
 
 if __name__ == "__main__":
     test_protocol()
