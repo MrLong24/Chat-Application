@@ -1,18 +1,3 @@
-"""
-Protocol Module for Multi-Client Chat Application
-
-This module defines the application-layer protocol for message formatting,
-parsing, and handling. It ensures consistent communication between clients and server.
-
-Protocol Format:
-    TYPE|SENDER|CONTENT<END>
-
-Example Messages:
-    TEXT|alice|Hello everyone!<END>
-    FILE|bob|document.pdf|1024|<binary_data><END>
-    BUZZ|charlie||<END>
-"""
-
 import json
 import sys
 import os
