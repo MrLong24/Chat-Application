@@ -1,13 +1,3 @@
-"""
-Encryption Utilities for Multi-Client Chat Application
-
-This module provides modular encryption/decryption functions using different algorithms.
-Supports XOR cipher and Caesar cipher for educational purposes.
-
-Security Note: These ciphers are for demonstration only. In production,
-use industry-standard encryption like AES, RSA, or TLS/SSL.
-"""
-
 import sys
 import os
 
