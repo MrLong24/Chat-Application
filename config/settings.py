@@ -1,8 +1,3 @@
-"""
-Configuration Settings for Multi-Client Chat Application
-Updated with Discord Dark Theme + New Features
-"""
-
 # ==================== SERVER CONFIGURATION ====================
 
 TCP_HOST = '0.0.0.0'
