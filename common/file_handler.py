@@ -1,13 +1,3 @@
-"""
-Enhanced File Transfer Handler with Progress Tracking
-
-Features:
-- Chunked file transfer for large files
-- Progress callbacks
-- Automatic downloads folder
-- File integrity verification
-"""
-
 import os
 import sys
 import hashlib
