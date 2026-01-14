@@ -29,7 +29,7 @@ class LoginDialog:
         
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Login - Chat Application")
-        self.dialog.geometry("450x400")
+        self.dialog.geometry("450x520")
         self.dialog.resizable(False, False)
         self.dialog.configure(bg=BG_COLOR)
         self.dialog.transient(parent)
@@ -37,8 +37,8 @@ class LoginDialog:
         
         self.dialog.update_idletasks()
         x = (self.dialog.winfo_screenwidth() // 2) - 225
-        y = (self.dialog.winfo_screenheight() // 2) - 200
-        self.dialog.geometry(f"450x400+{x}+{y}")
+        y = (self.dialog.winfo_screenheight() // 2) - 260
+        self.dialog.geometry(f"450x520+{x}+{y}")
         
         self.create_widgets()
         self.username_entry.focus()
@@ -241,6 +241,10 @@ class ChatClient:
         self.my_status = STATUS_ONLINE
         self.last_message_date = None
         
+        # NEW: Track received message IDs for read acknowledgment
+        self.received_message_ids = []
+        self.sent_message_ids = {}  # {msg_id: {'text': str, 'status': str}}
+
         # Threading
         self.receive_thread = None
         self.send_file_thread = None
@@ -258,7 +262,7 @@ class ChatClient:
         self.connect_to_server()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-    
+
     def show_login(self) -> bool:
         """Show login dialog."""
         dialog = LoginDialog(self.root)
@@ -679,7 +683,10 @@ class ChatClient:
                 break
     
     def process_message(self, raw_message: str):
-        """Process received message."""
+        """
+        Process received message.
+        FIX: Handle MESSAGE_DELIVERED as displayable chat message.
+        """
         parsed = parse_message(raw_message)
         
         if not parsed:
@@ -689,11 +696,58 @@ class ChatClient:
         sender = parsed['sender']
         content = parsed['content']
         
-        if msg_type == MSG_TYPE_TEXT:
+        # ===== FIX: HANDLE BOTH TEXT AND MESSAGE_DELIVERED =====
+        if msg_type == MSG_TYPE_TEXT or msg_type == MSG_TYPE_MESSAGE_DELIVERED:
+            # Parse message content
+            try:
+                # New format: JSON with msg_id and timestamp
+                msg_data = json.loads(content)
+                text = msg_data.get('text', content)
+                msg_id = msg_data.get('msg_id', 0)
+                timestamp = msg_data.get('timestamp', '')
+                
+                # Store message ID for read tracking
+                if msg_id:
+                    self.received_message_ids.append(msg_id)
+                    
+                    # Auto-send read acknowledgment after short delay
+                    self.root.after(1000, lambda: self.send_read_ack(msg_id))
+            
+            except (json.JSONDecodeError, AttributeError):
+                # Old format: plain text
+                text = content
+                msg_id = 0
+                timestamp = ''
+            
+            # Display message with appropriate color
             tag = "self" if sender == self.username else "others"
-            self.root.after(0, lambda: self.display_message(sender, content, tag))
+            self.root.after(0, lambda: self.display_message(sender, text, tag, msg_id, timestamp))
         
-        # NEW: Typing indicators
+        # ===== DELIVERY ACK (for sender) =====
+        elif msg_type == MSG_TYPE_DELIVERY_ACK or msg_type == 'DELIVERY_ACK':
+            try:
+                ack_data = json.loads(content)
+                msg_id = ack_data.get('msg_id')
+                recipient_info = ack_data.get('recipient', '')
+                
+                # Update UI to show delivery status
+                self.root.after(0, lambda: self.update_message_status(msg_id, 'delivered', recipient_info))
+            except:
+                pass
+        
+        # ===== READ ACK (for sender) =====
+        elif msg_type == MSG_TYPE_READ_ACK or msg_type == 'READ_ACK':
+            try:
+                ack_data = json.loads(content)
+                msg_id = ack_data.get('msg_id')
+                reader = ack_data.get('reader', '')
+                
+                # Update UI to show read status
+                self.root.after(0, lambda: self.update_message_status(msg_id, 'read', reader))
+            except:
+                pass
+        
+        # ===== TYPING INDICATORS =====
         elif msg_type == MSG_TYPE_TYPING_START or msg_type == 'TYPING_START':
             self.typing_users.add(sender)
             self.root.after(0, self.update_typing_indicator)
@@ -702,15 +756,16 @@ class ChatClient:
             self.typing_users.discard(sender)
             self.root.after(0, self.update_typing_indicator)
         
-        # NEW: Status changes
-        elif msg_type == MSG_TYPE_STATUS_CHANGE or msg_type == 'STATUS_CHANGE':
+        # ===== STATUS CHANGES =====
+        elif msg_type == MSG_TYPE_STATUS_CHANGE or msg_type == 'STATUS_CHANGE' or msg_type == MSG_TYPE_STATUS_UPDATE or msg_type == 'STATUS_UPDATE':
             self.user_statuses[sender] = content
             self.root.after(0, self.refresh_user_list)
         
-        # NEW: Session ID
+        # ===== SESSION ID =====
         elif msg_type == MSG_TYPE_SESSION_ID or msg_type == 'SESSION_ID':
             self.session_id = content
         
+        # ===== USER JOIN/LEAVE =====
         elif msg_type == MSG_TYPE_USER_JOIN:
             self.root.after(0, lambda: self.display_message("SERVER", f"→ {content} joined", "server"))
         
@@ -719,13 +774,16 @@ class ChatClient:
             self.root.after(0, lambda: self.display_message("SERVER", f"← {content} left", "server"))
             self.root.after(0, self.update_typing_indicator)
         
+        # ===== USER LIST =====
         elif msg_type == MSG_TYPE_USER_LIST:
             users = json.loads(content)
             self.root.after(0, lambda: self.update_user_list(users))
         
+        # ===== BUZZ =====
         elif msg_type == MSG_TYPE_BUZZ:
             self.root.after(0, lambda: self.handle_buzz(sender))
         
+        # ===== FILE TRANSFER =====
         elif msg_type == MSG_TYPE_FILE:
             self.root.after(0, lambda: self.handle_file_start(sender, content))
         
@@ -1116,6 +1174,127 @@ class ChatClient:
                 except:
                     pass
             self.root.destroy()
+
+    def send_read_ack(self, msg_id: int):
+        """
+        Send read acknowledgment for a message.
+        
+        Args:
+            msg_id (int): Message ID to acknowledge
+        """
+        if not self.connected or msg_id == 0:
+            return
+        
+        try:
+            read_msg = create_message(
+                MSG_TYPE_MESSAGE_READ,
+                self.username,
+                json.dumps({'msg_id': msg_id})
+            )
+            encrypted = encrypt(read_msg.encode('utf-8'))
+            self.socket.sendall(encrypted)
+        except Exception as e:
+            print(f"Read ACK error: {e}")
+
+    def update_message_status(self, msg_id: int, status: str, info: str):
+        """
+        Update displayed message status (delivered/read indicators).
+        
+        Args:
+            msg_id (int): Message ID
+            status (str): 'delivered' or 'read'
+            info (str): Additional info (recipient name or count)
+        """
+        # Store status for this message
+        if msg_id in self.sent_message_ids:
+            self.sent_message_ids[msg_id]['status'] = status
+            self.sent_message_ids[msg_id]['info'] = info
+            
+            # Update UI - could add visual indicator here
+            # For now, just print to console
+            print(f"Message {msg_id} {status}: {info}")
+
+    def display_message(self, sender: str, text: str, tag: str, msg_id: int = 0, timestamp: str = ''):
+        """
+        Display message with enhanced timestamp and delivery tracking.
+        
+        Args:
+            sender (str): Message sender
+            text (str): Message content
+            tag (str): Display tag (self/others/server)
+            msg_id (int): Message ID for tracking (optional)
+            timestamp (str): ISO timestamp (optional)
+        """
+        self.chat_display.config(state="normal")
+        
+        # Parse timestamp
+        if timestamp:
+            try:
+                dt = datetime.fromisoformat(timestamp)
+                time_str = dt.strftime("%H:%M")
+            except Exception:
+                time_str = datetime.now().strftime("%H:%M")
+        else:
+            time_str = datetime.now().strftime("%H:%M")
+        
+        # Date separator (if new day)
+        now = datetime.now()
+        if hasattr(self, 'last_message_date') and self.last_message_date:
+            if self.last_message_date != now.date():
+                date_text = f"\n───── {now.strftime('%B %d, %Y')} ─────\n"
+                self.chat_display.insert(tk.END, date_text, "timestamp")
+        
+        self.last_message_date = now.date()
+        
+        # Display message
+        self.chat_display.insert(tk.END, f"[{time_str}] ", "timestamp")
+        self.chat_display.insert(tk.END, f"{sender}: ", tag)
+        self.chat_display.insert(tk.END, f"{text}")
+        
+        # Add delivery indicator for sent messages
+        if sender == self.username and msg_id:
+            self.chat_display.insert(tk.END, " ✓", "timestamp")
+            self.sent_message_ids[msg_id] = {'text': text, 'status': 'sent'}
+        
+        self.chat_display.insert(tk.END, "\n")
+        
+        self.chat_display.see(tk.END)
+        self.chat_display.config(state="disabled")
+
+    def send_message(self):
+        """
+        Send text message with delivery tracking.
+        FIX: Now sends MESSAGE_SENT format.
+        """
+        text = self.message_entry.get().strip()
+        
+        if not text or not self.connected:
+            return
+        
+        # Stop typing indicator
+        self.stop_typing()
+        
+        try:
+            # Generate client-side message ID (server will assign authoritative ID)
+            import time
+            client_msg_id = int(time.time() * 1000)  # Millisecond timestamp
+            
+            # Send as MESSAGE_SENT (new format)
+            message = create_message(
+                MSG_TYPE_MESSAGE_SENT,
+                self.username,
+                json.dumps({'text': text, 'client_id': client_msg_id})
+            )
+            encrypted = encrypt(message.encode('utf-8'))
+            self.socket.sendall(encrypted)
+            
+            self.message_entry.delete(0, tk.END)
+            
+            # Display locally immediately (optimistic UI)
+            self.display_message(self.username, text, "self", client_msg_id)
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send:\n{e}")
 
     def run(self):
         """Start GUI."""
