@@ -1,3 +1,4 @@
+import json
 import socket
 import threading
 import sys
@@ -9,14 +10,14 @@ import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import (
-    TCP_HOST, TCP_PORT, MAX_CLIENTS, BUFFER_SIZE,
+    MESSAGE_ID_START, MSG_TYPE_MESSAGE_DELIVERED, MSG_TYPE_MESSAGE_READ, MSG_TYPE_MESSAGE_SENT, MSG_TYPE_STATUS_CHANGE, MSG_TYPE_STATUS_UPDATE, MSG_TYPE_TYPING_START, MSG_TYPE_TYPING_STOP, STATUS_ONLINE, TCP_HOST, TCP_PORT, MAX_CLIENTS, BUFFER_SIZE,
     USER_DATABASE, MSG_TYPE_AUTH, MSG_TYPE_AUTH_OK, MSG_TYPE_AUTH_FAIL
 )
 from common.protocol import (
-    parse_message, create_message, create_text_message,
+    create_delivered_ack, create_read_ack, parse_message, create_message, create_text_message,
     create_user_list_message, create_error_message,
     MessageBuffer, MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ,
-    MSG_TYPE_USER_JOIN, MSG_TYPE_USER_LEAVE, MSG_TYPE_FILE_CHUNK
+    MSG_TYPE_USER_JOIN, MSG_TYPE_USER_LEAVE, MSG_TYPE_FILE_CHUNK, parse_message_with_id
 )
 from common.encryption import encrypt, decrypt
 
@@ -32,11 +33,7 @@ class ChatServer:
     
     def __init__(self, host: str = TCP_HOST, port: int = TCP_PORT):
         """
-        Initialize chat server.
-        
-        Args:
-            host (str): Server IP address
-            port (int): Server port number
+        Initialize chat server with TIER 1 feature support.
         """
         self.host = host
         self.port = port
@@ -46,20 +43,35 @@ class ChatServer:
         self.clients = {}  # {username: socket}
         self.clients_lock = threading.Lock()
         
-        # User sessions
-        self.user_sessions = {}  # {username: {'socket': socket, 'address': addr, 'login_time': time}}
+        # TIER 1: Server-authoritative user state
+        self.user_sessions = {}  # {username: {'socket': socket, 'address': addr, 'login_time': time, 'status': str}}
+        self.user_status = {}    # {username: 'online'/'busy'/'offline'} - PRIMARY STATUS STORE
+        self.typing_users = set()  # Currently typing users
+        self.session_ids = {}    # {username: session_id} for reconnect
         
-        # NEW: Enhanced state tracking
-        self.user_status = {}      # {username: 'online'/'busy'/'offline'}
-        self.typing_users = set()  # Set of usernames currently typing
-        self.session_ids = {}      # {username: session_id} for reconnect
+        # TIER 1: Message delivery tracking
+        self.message_counter = MESSAGE_ID_START  # Auto-incrementing message IDs
+        self.pending_messages = {}  # {msg_id: {'sender': str, 'recipients': set(), 'delivered': set(), 'read': set()}}
+        self.message_counter_lock = threading.Lock()
         
         # File transfer tracking
-        self.file_transfers = {}  # {username: FileWriter object}
+        self.file_transfers = {}
         
         # Server state
         self.running = False
         self.start_time = None
+    
+    def get_next_message_id(self) -> int:
+        """
+        Get next unique message ID (thread-safe).
+        
+        Returns:
+            int: Unique message ID
+        """
+        with self.message_counter_lock:
+            msg_id = self.message_counter
+            self.message_counter += 1
+            return msg_id
     
     def start(self):
         """
@@ -164,23 +176,25 @@ class ChatServer:
             # Add to clients dictionary
             with self.clients_lock:
                 self.clients[username] = client_socket
+                
+                # TIER 1: Initialize server-authoritative status
+                self.user_status[username] = STATUS_ONLINE
+                
                 self.user_sessions[username] = {
                     'socket': client_socket,
                     'address': client_address,
-                    'login_time': datetime.now()
+                    'login_time': datetime.now(),
+                    'status': STATUS_ONLINE  # Redundant but explicit
                 }
                 
-                # NEW: Set initial status
-                self.user_status[username] = 'online'
-                
-                # NEW: Generate session ID for reconnect
+                # Generate session ID for reconnect
                 import uuid
                 session_id = str(uuid.uuid4())
                 self.session_ids[username] = session_id
             
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ {username} authenticated from {client_address}")
             
-            # NEW: Send session ID to client
+            # Send session ID to client
             from common.protocol import create_session_message
             session_msg = create_session_message(session_id)
             self.send_raw(client_socket, session_msg)
@@ -309,10 +323,7 @@ class ChatServer:
     def process_message(self, username: str, raw_message: str):
         """
         Process received message from client.
-        
-        Args:
-            username (str): Sender's username
-            raw_message (str): Raw message string
+        TIER 1: Full server-side logic for all features.
         """
         parsed = parse_message(raw_message)
         
@@ -320,45 +331,126 @@ class ChatServer:
             return
         
         msg_type = parsed['type']
+        content = parsed['content']
         
-        if msg_type == MSG_TYPE_TEXT:
-            # Broadcast text message to all clients
-            self.broadcast_message(raw_message)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username}: {parsed['content'][:50]}")
+        # ===== TIER 1: TEXT MESSAGE WITH DELIVERY TRACKING =====
+        # FIX: Handle BOTH old TEXT and new MESSAGE_SENT
+        if msg_type == MSG_TYPE_MESSAGE_SENT or msg_type == MSG_TYPE_TEXT:
+            # Assign message ID and timestamp (server-authoritative)
+            msg_id = self.get_next_message_id()
+            timestamp = datetime.now().isoformat()
+            
+            # Parse content (handle both formats)
+            if msg_type == MSG_TYPE_MESSAGE_SENT:
+                try:
+                    msg_data = json.loads(content)
+                    text = msg_data.get('text', content)
+                except:
+                    text = content
+            else:
+                # Old-style TEXT message
+                text = content
+            
+            # Track message for delivery
+            with self.clients_lock:
+                recipients = set(self.clients.keys()) - {username}
+            
+            self.pending_messages[msg_id] = {
+                'sender': username,
+                'text': text,
+                'timestamp': timestamp,
+                'recipients': recipients.copy(),
+                'delivered': set(),
+                'read': set()
+            }
+            
+            # FIX: Broadcast using MESSAGE_DELIVERED (with full data)
+            msg_content = json.dumps({
+                'text': text,
+                'msg_id': msg_id,
+                'timestamp': timestamp
+            })
+            broadcast_msg = create_message(MSG_TYPE_MESSAGE_DELIVERED, username, msg_content)
+            
+            # Deliver to all recipients
+            delivered_count = 0
+            with self.clients_lock:
+                for recipient, client_socket in self.clients.items():
+                    if recipient != username:
+                        try:
+                            encrypted = encrypt(broadcast_msg.encode('utf-8'))
+                            client_socket.sendall(encrypted)
+                            self.pending_messages[msg_id]['delivered'].add(recipient)
+                            delivered_count += 1
+                        except Exception as e:
+                            print(f"Failed to deliver to {recipient}: {e}")
+            
+            # Send delivery ack to sender
+            delivery_ack = create_delivered_ack(msg_id, f"{delivered_count} recipients")
+            self.send_to_client(username, delivery_ack)
+            
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username}: {text[:50]} [MSG_ID:{msg_id}, DELIVERED:{delivered_count}]")
+    
         
-        elif msg_type == MSG_TYPE_BUZZ:
-            # Forward buzz to all clients except sender
-            self.broadcast_message(raw_message, exclude=username)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} sent a BUZZ")
-        
-        # NEW: Typing indicator handlers
-        elif msg_type == 'TYPING_START':
+        # ===== TIER 1: TYPING INDICATORS (SERVER RELAYS) =====
+        elif msg_type == MSG_TYPE_TYPING_START or msg_type == 'TYPING_START':
             with self.clients_lock:
                 self.typing_users.add(username)
-            # Broadcast to others (not back to sender)
+            # Relay to ALL other clients (server does not filter)
             self.broadcast_message(raw_message, exclude=username)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} started typing")
         
-        elif msg_type == 'TYPING_STOP':
+        elif msg_type == MSG_TYPE_TYPING_STOP or msg_type == 'TYPING_STOP':
             with self.clients_lock:
                 self.typing_users.discard(username)
             self.broadcast_message(raw_message, exclude=username)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} stopped typing")
         
-        # NEW: Status change handler
-        elif msg_type == 'STATUS_CHANGE':
-            new_status = parsed['content']
+        # ===== TIER 1: STATUS CHANGE (SERVER-AUTHORITATIVE) =====
+        elif msg_type == MSG_TYPE_STATUS_CHANGE or msg_type == 'STATUS_CHANGE':
+            new_status = content
+            
+            # SERVER updates status (single source of truth)
             with self.clients_lock:
                 self.user_status[username] = new_status
-            # Broadcast status change to all
-            self.broadcast_message(raw_message)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} is now {new_status}")
+                if username in self.user_sessions:
+                    self.user_sessions[username]['status'] = new_status
+            
+            # Broadcast status update to ALL clients (including sender for confirmation)
+            status_update = create_message(MSG_TYPE_STATUS_UPDATE, username, new_status)
+            self.broadcast_message(status_update)  # No exclude - everyone gets it
+            
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} status → {new_status}")
         
-        elif msg_type == MSG_TYPE_FILE:
-            # Handle file transfer initiation
+        # ===== TIER 1: READ ACKNOWLEDGMENT =====
+        elif msg_type == MSG_TYPE_MESSAGE_READ or msg_type == 'MSG_READ':
+            try:
+                read_data = json.loads(content)
+                msg_id = read_data.get('msg_id')
+                
+                if msg_id and msg_id in self.pending_messages:
+                    self.pending_messages[msg_id]['read'].add(username)
+                    
+                    # Notify original sender
+                    original_sender = self.pending_messages[msg_id]['sender']
+                    read_ack = create_read_ack(msg_id, username)
+                    self.send_to_client(original_sender, read_ack)
+                    
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Message {msg_id} read by {username}")
+            except:
+                pass
+        
+        # ===== EXISTING: BUZZ =====
+        elif msg_type == MSG_TYPE_BUZZ:
             self.broadcast_message(raw_message, exclude=username)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} initiated file transfer: {parsed['content']}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} sent a BUZZ")
+        
+        # ===== EXISTING: FILE TRANSFER =====
+        elif msg_type == MSG_TYPE_FILE:
+            self.broadcast_message(raw_message, exclude=username)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} initiated file transfer")
         
         elif msg_type == MSG_TYPE_FILE_CHUNK:
-            # Forward file chunk
             self.broadcast_raw(raw_message.encode('utf-8'), exclude=username)
     
     def broadcast_message(self, message: str, exclude: str = None):
@@ -509,7 +601,6 @@ def main():
         print("\n\n⚠ Interrupted by user")
     finally:
         server.stop()
-
 
 if __name__ == "__main__":
     main()
