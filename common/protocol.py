@@ -1,19 +1,18 @@
 import json
 import sys
 import os
+import time
+from datetime import datetime
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import (
-    MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ,
+    MSG_TYPE_DELIVERY_ACK, MSG_TYPE_FILE_COMPLETE, MSG_TYPE_MESSAGE_SENT, MSG_TYPE_READ_ACK, MSG_TYPE_RECONNECT, MSG_TYPE_SESSION_ID, MSG_TYPE_STATUS_CHANGE, MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ, MSG_TYPE_TYPING_START, MSG_TYPE_TYPING_STOP,
     MSG_TYPE_USER_JOIN, MSG_TYPE_USER_LEAVE, MSG_TYPE_USER_LIST,
     MSG_TYPE_AUTH, MSG_TYPE_AUTH_OK, MSG_TYPE_AUTH_FAIL,
-    MSG_TYPE_ERROR, MSG_DELIMITER, MSG_TYPE_FILE_CHUNK,
-    MSG_TYPE_FILE_COMPLETE, MSG_TYPE_TYPING_START, MSG_TYPE_TYPING_STOP,
-    MSG_TYPE_STATUS_CHANGE, MSG_TYPE_RECONNECT, MSG_TYPE_SESSION_ID
+    MSG_TYPE_ERROR, MSG_DELIMITER, MSG_TYPE_FILE_CHUNK
 )
-
 
 # ==================== MESSAGE CREATION ====================
 
@@ -221,6 +220,75 @@ def create_session_message(session_id: str) -> str:
         str: Formatted message
     """
     return create_message(MSG_TYPE_SESSION_ID, "SERVER", session_id)
+
+
+# ==================== TIER 1: MESSAGE DELIVERY TRACKING ====================
+
+def create_text_with_id(sender: str, text: str, msg_id: int, timestamp: str) -> str:
+    """
+    Create text message with ID and timestamp for delivery tracking.
+    
+    Args:
+        sender (str): Username
+        text (str): Message content
+        msg_id (int): Unique message ID
+        timestamp (str): ISO timestamp
+    
+    Returns:
+        str: Formatted message
+    """
+    content = json.dumps({
+        'text': text,
+        'msg_id': msg_id,
+        'timestamp': timestamp
+    })
+    return create_message(MSG_TYPE_MESSAGE_SENT, sender, content)
+
+
+def create_delivered_ack(msg_id: int, recipient: str) -> str:
+    """
+    Create delivery acknowledgment.
+    
+    Args:
+        msg_id (int): Message ID that was delivered
+        recipient (str): Who received it
+    
+    Returns:
+        str: Formatted message
+    """
+    content = json.dumps({'msg_id': msg_id, 'recipient': recipient})
+    return create_message(MSG_TYPE_DELIVERY_ACK, "SERVER", content)
+
+
+def create_read_ack(msg_id: int, reader: str) -> str:
+    """
+    Create read acknowledgment.
+    
+    Args:
+        msg_id (int): Message ID that was read
+        reader (str): Who read it
+    
+    Returns:
+        str: Formatted message
+    """
+    content = json.dumps({'msg_id': msg_id, 'reader': reader})
+    return create_message(MSG_TYPE_READ_ACK, reader, content)
+
+
+def parse_message_with_id(content: str) -> dict:
+    """
+    Parse message content with ID and timestamp.
+    
+    Args:
+        content (str): JSON content
+    
+    Returns:
+        dict: Parsed message data
+    """
+    try:
+        return json.loads(content)
+    except:
+        return {'text': content, 'msg_id': 0, 'timestamp': ''}
 
 
 # ==================== MESSAGE PARSING ====================
@@ -438,6 +506,21 @@ class MessageBuffer:
         
         return messages
     
+    def create_message_sent(sender: str, text: str, client_id: int = 0) -> str:
+        """
+        Create MESSAGE_SENT message for delivery tracking.
+        
+        Args:
+            sender (str): Username
+            text (str): Message content
+            client_id (int): Optional client-generated ID
+        
+        Returns:
+            str: Formatted message
+        """
+        content = json.dumps({'text': text, 'client_id': client_id})
+        return create_message(MSG_TYPE_MESSAGE_SENT, sender, content)
+
     def clear(self):
         """Clear the buffer."""
         self.buffer = ""
