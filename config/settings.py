@@ -22,7 +22,7 @@ RECONNECT_DELAY = 2
 
 # ==================== PROTOCOL CONFIGURATION ====================
 
-# Original message types
+# Core message types
 MSG_TYPE_TEXT = 'TEXT'
 MSG_TYPE_FILE = 'FILE'
 MSG_TYPE_FILE_CHUNK = 'CHUNK'
@@ -35,25 +35,41 @@ MSG_TYPE_AUTH = 'AUTH'
 MSG_TYPE_AUTH_OK = 'AUTH_OK'
 MSG_TYPE_AUTH_FAIL = 'AUTH_FAIL'
 MSG_TYPE_ERROR = 'ERROR'
-MSG_TYPE_FILE_ACK = 'FILE_ACK'
-MSG_TYPE_PROGRESS = 'PROGRESS'
 
-# NEW: Enhanced features
+# TIER 1 FEATURE: Typing indicators (server-relayed)
 MSG_TYPE_TYPING_START = 'TYPING_START'
 MSG_TYPE_TYPING_STOP = 'TYPING_STOP'
+
+# TIER 1 FEATURE: User status (server-authoritative)
 MSG_TYPE_STATUS_CHANGE = 'STATUS_CHANGE'
+MSG_TYPE_STATUS_UPDATE = 'STATUS_UPDATE'  # Server broadcasts to all
+
+# TIER 1 FEATURE: Message delivery tracking
+MSG_TYPE_MESSAGE_SENT = 'MESSAGE_SENT'      # Client → Server
+MSG_TYPE_MESSAGE_DELIVERED = 'MSG_DELIVERED'  # Server → Clients
+MSG_TYPE_MESSAGE_READ = 'MSG_READ'          # Client → Server
+MSG_TYPE_DELIVERY_ACK = 'DELIVERY_ACK'      # Server → Sender
+MSG_TYPE_READ_ACK = 'READ_ACK'              # Server → Sender
+
+# TIER 1 FEATURE: Reconnect & session management
 MSG_TYPE_RECONNECT = 'RECONNECT'
 MSG_TYPE_SESSION_ID = 'SESSION_ID'
+MSG_TYPE_HEARTBEAT = 'HEARTBEAT'
 
 MSG_DELIMITER = '<END>'
 
-# User Status Values
+# User Status Values (server-authoritative)
 STATUS_ONLINE = 'online'
 STATUS_BUSY = 'busy'
 STATUS_OFFLINE = 'offline'
 
-# Typing indicator timeout (seconds)
-TYPING_TIMEOUT = 3
+# Typing indicator settings
+TYPING_TIMEOUT = 3  # Seconds before auto-stop
+TYPING_DEBOUNCE = 0.5  # Minimum seconds between typing messages
+
+# Message delivery tracking
+MESSAGE_ID_START = 1000
+MESSAGE_TIMEOUT = 30  # Seconds before message marked as failed
 
 # ==================== ENCRYPTION CONFIGURATION ====================
 
