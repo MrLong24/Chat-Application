@@ -42,19 +42,41 @@ MSG_TYPE_TYPING_STOP = 'TYPING_STOP'
 
 # TIER 1 FEATURE: User status (server-authoritative)
 MSG_TYPE_STATUS_CHANGE = 'STATUS_CHANGE'
-MSG_TYPE_STATUS_UPDATE = 'STATUS_UPDATE'  # Server broadcasts to all
+MSG_TYPE_STATUS_UPDATE = 'STATUS_UPDATE'
 
 # TIER 1 FEATURE: Message delivery tracking
-MSG_TYPE_MESSAGE_SENT = 'MESSAGE_SENT'      # Client → Server
-MSG_TYPE_MESSAGE_DELIVERED = 'MSG_DELIVERED'  # Server → Clients
-MSG_TYPE_MESSAGE_READ = 'MSG_READ'          # Client → Server
-MSG_TYPE_DELIVERY_ACK = 'DELIVERY_ACK'      # Server → Sender
-MSG_TYPE_READ_ACK = 'READ_ACK'              # Server → Sender
+MSG_TYPE_MESSAGE_SENT = 'MESSAGE_SENT'
+MSG_TYPE_MESSAGE_DELIVERED = 'MSG_DELIVERED'
+MSG_TYPE_MESSAGE_READ = 'MSG_READ'
+MSG_TYPE_DELIVERY_ACK = 'DELIVERY_ACK'
+MSG_TYPE_READ_ACK = 'READ_ACK'
 
 # TIER 1 FEATURE: Reconnect & session management
 MSG_TYPE_RECONNECT = 'RECONNECT'
 MSG_TYPE_SESSION_ID = 'SESSION_ID'
 MSG_TYPE_HEARTBEAT = 'HEARTBEAT'
+
+# ==================== TIER 2: ADVANCED FILE TRANSFER ====================
+
+# File transfer protocol
+MSG_TYPE_FILE_OFFER = 'FILE_OFFER'       # Sender → Receiver: Offer file
+MSG_TYPE_FILE_ACCEPT = 'FILE_ACCEPT'     # Receiver → Sender: Accept download
+MSG_TYPE_FILE_REJECT = 'FILE_REJECT'     # Receiver → Sender: Reject download
+MSG_TYPE_FILE_DATA = 'FILE_DATA'         # Sender → Receiver: Chunk data
+MSG_TYPE_FILE_PAUSE = 'FILE_PAUSE'       # Either: Pause transfer
+MSG_TYPE_FILE_RESUME = 'FILE_RESUME'     # Either: Resume transfer
+MSG_TYPE_FILE_CANCEL = 'FILE_CANCEL'     # Either: Cancel transfer
+MSG_TYPE_FILE_ACK = 'FILE_ACK'           # Receiver → Sender: Chunk received
+
+# File transfer states
+FILE_STATE_OFFERED = 'offered'           # File offered, waiting for response
+FILE_STATE_ACCEPTED = 'accepted'         # Receiver accepted
+FILE_STATE_REJECTED = 'rejected'         # Receiver rejected
+FILE_STATE_TRANSFERRING = 'transferring' # Active transfer
+FILE_STATE_PAUSED = 'paused'             # Paused
+FILE_STATE_COMPLETED = 'completed'       # Successfully completed
+FILE_STATE_CANCELLED = 'cancelled'       # Cancelled by user
+FILE_STATE_ERROR = 'error'               # Error occurred
 
 MSG_DELIMITER = '<END>'
 
@@ -64,12 +86,12 @@ STATUS_BUSY = 'busy'
 STATUS_OFFLINE = 'offline'
 
 # Typing indicator settings
-TYPING_TIMEOUT = 3  # Seconds before auto-stop
-TYPING_DEBOUNCE = 0.5  # Minimum seconds between typing messages
+TYPING_TIMEOUT = 3
+TYPING_DEBOUNCE = 0.5
 
 # Message delivery tracking
 MESSAGE_ID_START = 1000
-MESSAGE_TIMEOUT = 30  # Seconds before message marked as failed
+MESSAGE_TIMEOUT = 30
 
 # ==================== ENCRYPTION CONFIGURATION ====================
 
@@ -82,6 +104,14 @@ CAESAR_SHIFT = 13
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
 CHUNK_SIZE = 8192  # 8KB chunks
 LARGE_FILE_THRESHOLD = 50 * 1024 * 1024  # 50 MB
+
+# TIER 2: File transfer settings
+FILE_CHUNK_SIZE = 8192               # 8KB per chunk
+FILE_TRANSFER_TIMEOUT = 300          # 5 minutes timeout
+FILE_MAX_CONCURRENT = 10             # Max concurrent transfers per user
+FILE_ACK_FREQUENCY = 10              # Send ACK every N chunks
+FILE_RETRY_ATTEMPTS = 3              # Retry failed chunks
+FILE_RETRY_DELAY = 1                 # Seconds between retries
 
 ALLOWED_EXTENSIONS = []
 
@@ -166,9 +196,11 @@ def get_config_summary():
     Buffer Size: {BUFFER_SIZE} bytes
     Encryption: {ENCRYPTION_METHOD}
     Max File Size: {MAX_FILE_SIZE / (1024*1024):.0f} MB
+    File Chunk Size: {FILE_CHUNK_SIZE} bytes
+    Max Concurrent Transfers: {FILE_MAX_CONCURRENT}
     Theme: Discord Dark
     Downloads: {DOWNLOADS_FOLDER}/
-    New Features: Typing, Status, Reconnect
+    Features: Chat, Typing, Status, File Transfer (Tier 2)
     ===========================================
     """
 
