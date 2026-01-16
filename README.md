@@ -111,4 +111,8 @@ Each message contains:
 
 ### Step 1: Start the Server
 ```bash
-python server.py
+python server/server.py
+```
+### Step 2: Start Client
+```bash
+python client/client.py
