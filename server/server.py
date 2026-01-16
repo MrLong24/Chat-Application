@@ -9,7 +9,7 @@ import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import (
-    MESSAGE_ID_START, MSG_TYPE_MESSAGE_DELIVERED, MSG_TYPE_MESSAGE_READ, 
+    MESSAGE_ID_START, MSG_DELIMITER, MSG_TYPE_MESSAGE_DELIVERED, MSG_TYPE_MESSAGE_READ, 
     MSG_TYPE_MESSAGE_SENT, MSG_TYPE_STATUS_CHANGE, MSG_TYPE_STATUS_UPDATE, 
     MSG_TYPE_TYPING_START, MSG_TYPE_TYPING_STOP, STATUS_ONLINE, 
     TCP_HOST, TCP_PORT, MAX_CLIENTS, BUFFER_SIZE,
@@ -22,7 +22,7 @@ from config.settings import (
     FILE_STATE_PAUSED, FILE_STATE_COMPLETED, FILE_STATE_CANCELLED
 )
 from common.protocol import (
-    create_delivered_ack, create_read_ack, parse_message, create_message, 
+    create_delivered_ack, create_file_data_message, create_read_ack, parse_message, create_message, 
     create_text_message, create_user_list_message, create_error_message,
     MessageBuffer, MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ,
     MSG_TYPE_USER_JOIN, MSG_TYPE_USER_LEAVE, MSG_TYPE_FILE_CHUNK, 
@@ -140,6 +140,45 @@ class ChatServer:
         
         print("\n✓ Server stopped\n")
     
+    def process_file_data(self, username, raw_bytes):
+        try:
+            # FILE_DATA|sender|{json}|<binary><END>
+
+            # Tìm vị trí header
+            parts = raw_bytes.split(b'|', 3)
+
+            msg_type = parts[0].decode()
+            sender = parts[1].decode()
+            meta_json = parts[2].decode()
+
+            meta = json.loads(meta_json)
+            file_id = meta['file_id']
+            offset = meta['offset']
+            size = meta['size']
+
+            binary_with_end = parts[3]
+            chunk = binary_with_end[:-len(MSG_DELIMITER)]
+
+            # Chuyển tiếp cho người nhận (KHÔNG decode)
+            self.relay_file_chunk(file_id, sender, offset, chunk)
+
+        except Exception as e:
+            print(f"Error parsing FILE_DATA: {e}")
+
+    def relay_file_chunk(self, file_id, sender, offset, chunk):
+        with self.file_transfers_lock:
+            transfer = self.file_transfers.get(file_id)
+            if not transfer:
+                return
+
+            receiver = transfer['receiver']
+            sock = self.clients.get(receiver)
+
+            if sock:
+                msg = create_file_data_message(sender, file_id, offset, chunk)
+                sock.sendall(encrypt(msg))
+
+
     def handle_client(self, client_socket: socket.socket, client_address: tuple):
         """Handle individual client connection."""
         username = None
@@ -195,8 +234,14 @@ class ChatServer:
                     if not encrypted_data:
                         break
                     
-                    data = decrypt(encrypted_data).decode('utf-8', errors='ignore')
-                    message_buffer.add_data(data)
+                    decrypted = decrypt(encrypted_data)
+
+                    # Nếu là FILE_DATA → xử lý riêng
+                    if decrypted.startswith(b'FILE_DATA|'):
+                        self.process_file_data(username, decrypted)
+                    else:
+                        text = decrypted.decode('utf-8', errors='ignore')
+                        message_buffer.add_data(text)
                     
                     for raw_message in message_buffer.get_messages():
                         self.process_message(username, raw_message)
