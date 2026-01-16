@@ -1057,6 +1057,92 @@ class ChatClient:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
+    def handle_file_data(self, raw_bytes: bytes):
+        """
+        Xử lý FILE_DATA (NHỊ PHÂN)
+        FILE_DATA|sender|{json}|<binary><END>
+        """
+        try:
+            parts = raw_bytes.split(b'|', 3)
+
+            sender = parts[1].decode('utf-8')
+            meta = json.loads(parts[2].decode('utf-8'))
+
+            file_id = meta['file_id']
+            offset = meta['offset']
+            size = meta['size']
+
+            binary_with_end = parts[3]
+            chunk = binary_with_end[:-len(MSG_DELIMITER)]
+
+            # Ghi chunk vào file
+            self.file_transfer_manager.handle_data_chunk(
+                file_id, offset, chunk
+            )
+
+        except Exception as e:
+            print(f"Error handling FILE_DATA: {e}")
+
+
+    def handle_text(self, text: str):
+        """
+        Xử lý các message dạng TEXT / JSON (KHÔNG phải FILE_DATA)
+        """
+        self.message_buffer.add_data(text)
+
+        for raw_message in self.message_buffer.get_messages():
+            parsed = parse_message(raw_message)
+            if not parsed:
+                continue
+
+            msg_type = parsed['type']
+            sender = parsed['sender']
+            content = parsed['content']
+
+            # ===== FILE OFFER =====
+            if msg_type == MSG_TYPE_FILE_OFFER:
+                offer = json.loads(content)
+                self.file_transfer_manager.create_receive_transfer(
+                    file_id=offer['file_id'],
+                    sender=sender,
+                    filename=offer['filename'],
+                    filesize=offer['filesize']
+                )
+
+            # ===== FILE ACCEPT =====
+            elif msg_type == MSG_TYPE_FILE_ACCEPT:
+                data = json.loads(content)
+                self.file_transfer_manager.handle_accept(data['file_id'])
+
+            # ===== FILE PAUSE =====
+            elif msg_type == MSG_TYPE_FILE_PAUSE:
+                data = json.loads(content)
+                self.file_transfer_manager.handle_pause(
+                    data['file_id'], data['offset']
+                )
+
+            # ===== FILE RESUME =====
+            elif msg_type == MSG_TYPE_FILE_RESUME:
+                data = json.loads(content)
+                self.file_transfer_manager.handle_resume(
+                    data['file_id'], data['offset']
+                )
+
+            # ===== FILE CANCEL =====
+            elif msg_type == MSG_TYPE_FILE_CANCEL:
+                data = json.loads(content)
+                self.file_transfer_manager.handle_cancel(data['file_id'])
+
+            # ===== FILE COMPLETE =====
+            elif msg_type == MSG_TYPE_FILE_COMPLETE:
+                data = json.loads(content)
+                self.file_transfer_manager.handle_complete(data['file_id'])
+
+            # ===== TEXT / STATUS / BUZZ =====
+            else:
+                self.ui_queue.put(('message', parsed))
+
+
     def show_login(self) -> bool:
         """Show login dialog."""
         dialog = LoginDialog(self.root)
@@ -1434,16 +1520,23 @@ class ChatClient:
                     break
                 
                 decrypted_data = decrypt(encrypted_data)
-                
-                try:
-                    text_data = decrypted_data.decode('utf-8')
-                    self.message_buffer.add_data(text_data)
-                    
-                    for message in self.message_buffer.get_messages():
-                        self.process_message(message)
-                
-                except UnicodeDecodeError:
-                    pass
+
+                if decrypted_data.startswith(b'FILE_DATA|'):
+                    try:
+                        raw_message = decrypted_data.decode('latin1')
+                        self.process_message(raw_message)
+                    except Exception as e:
+                        print(f"Error parsing FILE_DATA: {e}")
+                else:
+                    try:
+                        text_data = decrypted_data.decode('utf-8')
+                        self.message_buffer.add_data(text_data)
+
+                        for message in self.message_buffer.get_messages():
+                            self.process_message(message)
+                    except UnicodeDecodeError:
+                        pass
+
             
             except Exception as e:
                 if self.running:
