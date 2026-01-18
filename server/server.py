@@ -22,7 +22,7 @@ from config.settings import (
     FILE_STATE_PAUSED, FILE_STATE_COMPLETED, FILE_STATE_CANCELLED
 )
 from common.protocol import (
-    create_delivered_ack, create_file_data_message, create_read_ack, parse_message, create_message, 
+    create_delivered_ack, create_read_ack, parse_message, create_message, 
     create_text_message, create_user_list_message, create_error_message,
     MessageBuffer, MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ,
     MSG_TYPE_USER_JOIN, MSG_TYPE_USER_LEAVE, MSG_TYPE_FILE_CHUNK, 
@@ -88,7 +88,7 @@ class ChatServer:
             self.start_time = datetime.now()
             
             print("=" * 60)
-            print(f"✓ Chat Server Started (Tier 2: File Transfer)")
+            print(f"✓ Chat Server Started (Tier 2: File Transfer - Base64)")
             print(f"  Host: {self.host}")
             print(f"  Port: {self.port}")
             print(f"  Max Clients: {MAX_CLIENTS}")
@@ -140,45 +140,6 @@ class ChatServer:
         
         print("\n✓ Server stopped\n")
     
-    def process_file_data(self, username, raw_bytes):
-        try:
-            # FILE_DATA|sender|{json}|<binary><END>
-
-            # Tìm vị trí header
-            parts = raw_bytes.split(b'|', 3)
-
-            msg_type = parts[0].decode()
-            sender = parts[1].decode()
-            meta_json = parts[2].decode()
-
-            meta = json.loads(meta_json)
-            file_id = meta['file_id']
-            offset = meta['offset']
-            size = meta['size']
-
-            binary_with_end = parts[3]
-            chunk = binary_with_end[:-len(MSG_DELIMITER)]
-
-            # Chuyển tiếp cho người nhận (KHÔNG decode)
-            self.relay_file_chunk(file_id, sender, offset, chunk)
-
-        except Exception as e:
-            print(f"Error parsing FILE_DATA: {e}")
-
-    def relay_file_chunk(self, file_id, sender, offset, chunk):
-        with self.file_transfers_lock:
-            transfer = self.file_transfers.get(file_id)
-            if not transfer:
-                return
-
-            receiver = transfer['receiver']
-            sock = self.clients.get(receiver)
-
-            if sock:
-                msg = create_file_data_message(sender, file_id, offset, chunk)
-                sock.sendall(encrypt(msg))
-
-
     def handle_client(self, client_socket: socket.socket, client_address: tuple):
         """Handle individual client connection."""
         username = None
@@ -226,7 +187,7 @@ class ChatServer:
             # Send user list
             self.send_user_list(username)
             
-            # Main communication loop
+            # Main communication loop - ALL MESSAGES ARE TEXT NOW
             while self.running:
                 try:
                     encrypted_data = client_socket.recv(BUFFER_SIZE)
@@ -234,15 +195,14 @@ class ChatServer:
                     if not encrypted_data:
                         break
                     
+                    # Decrypt and decode as UTF-8 (ALL messages are text)
                     decrypted = decrypt(encrypted_data)
-
-                    # Nếu là FILE_DATA → xử lý riêng
-                    if decrypted.startswith(b'FILE_DATA|'):
-                        self.process_file_data(username, decrypted)
-                    else:
-                        text = decrypted.decode('utf-8', errors='ignore')
-                        message_buffer.add_data(text)
+                    text = decrypted.decode('utf-8', errors='ignore')
                     
+                    # Add to buffer
+                    message_buffer.add_data(text)
+                    
+                    # Process complete messages
                     for raw_message in message_buffer.get_messages():
                         self.process_message(username, raw_message)
                 
@@ -320,7 +280,7 @@ class ChatServer:
     def process_message(self, username: str, raw_message: str):
         """
         Process received message from client.
-        Tier 1 + Tier 2 (file transfer relay).
+        Tier 1 + Tier 2 (file transfer relay) - ALL TEXT-BASED.
         """
         parsed = parse_message(raw_message)
         
@@ -422,7 +382,7 @@ class ChatServer:
             self.broadcast_message(raw_message, exclude=username)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} sent a BUZZ")
         
-        # ===== TIER 2: FILE TRANSFER PROTOCOL =====
+        # ===== TIER 2: FILE TRANSFER PROTOCOL (BASE64) =====
         
         elif msg_type == MSG_TYPE_FILE_OFFER:
             # Parse offer
@@ -486,27 +446,24 @@ class ChatServer:
                 print(f"Error handling FILE_REJECT: {e}")
         
         elif msg_type == MSG_TYPE_FILE_DATA:
-            # FILE_DATA contains binary data - relay as-is
-            # Server does NOT decrypt/parse binary chunks
+            # FILE_DATA is now pure JSON with Base64 - relay as-is (text)
             try:
-                # Extract file_id from header to identify transfer
-                header_data = json.loads(content.split('|')[0])
-                file_id = header_data.get('file_id')
+                data_payload = json.loads(content)
+                file_id = data_payload.get('file_id')
                 
                 with self.file_transfers_lock:
                     if file_id in self.file_transfers:
                         transfer = self.file_transfers[file_id]
                         transfer['state'] = FILE_STATE_TRANSFERRING
-                        transfer['offset'] = header_data.get('offset', 0) + header_data.get('size', 0)
+                        transfer['offset'] = data_payload.get('offset', 0) + data_payload.get('size', 0)
                         
                         receiver = transfer['receiver']
                         
-                        # Relay entire raw message to receiver
+                        # Relay entire message to receiver (it's text now)
                         if receiver:
                             self.send_to_client(receiver, raw_message)
             except Exception as e:
-                # Binary data - just relay
-                pass
+                print(f"Error relaying FILE_DATA: {e}")
         
         elif msg_type == MSG_TYPE_FILE_PAUSE:
             try:
@@ -628,7 +585,7 @@ class ChatServer:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} initiated legacy file transfer")
         
         elif msg_type == MSG_TYPE_FILE_CHUNK:
-            self.broadcast_raw(raw_message.encode('utf-8'), exclude=username)
+            self.broadcast_message(raw_message, exclude=username)
     
     def broadcast_message(self, message: str, exclude: str = None):
         """Broadcast message to all connected clients."""
@@ -639,19 +596,6 @@ class ChatServer:
                 
                 try:
                     encrypted = encrypt(message.encode('utf-8'))
-                    client_socket.sendall(encrypted)
-                except Exception as e:
-                    print(f"Error sending to {username}: {e}")
-    
-    def broadcast_raw(self, data: bytes, exclude: str = None):
-        """Broadcast raw bytes to all connected clients."""
-        with self.clients_lock:
-            for username, client_socket in list(self.clients.items()):
-                if username == exclude:
-                    continue
-                
-                try:
-                    encrypted = encrypt(data)
                     client_socket.sendall(encrypted)
                 except Exception as e:
                     print(f"Error sending to {username}: {e}")
@@ -731,7 +675,7 @@ class ChatServer:
 def main():
     """Main entry point for server."""
     print("\n" + "=" * 60)
-    print("  MULTI-CLIENT CHAT SERVER - TIER 2: FILE TRANSFER")
+    print("  MULTI-CLIENT CHAT SERVER - TIER 2: FILE TRANSFER (BASE64)")
     print("=" * 60 + "\n")
     
     server = ChatServer()
