@@ -2,6 +2,7 @@ import json
 import sys
 import os
 import time
+import base64
 from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -187,36 +188,34 @@ def create_file_reject_message(sender: str, file_id: str, reason: str = "") -> s
 
 
 def create_file_data_message(sender: str, file_id: str, offset: int, 
-                             chunk_data: bytes) -> bytes:
+                             chunk_data: bytes) -> str:
     """
-    Create FILE_DATA message with binary chunk.
+    Create FILE_DATA message with Base64-encoded chunk.
     
-    CRITICAL: Returns PURE BYTES containing binary data.
+    REFACTORED: Now returns TEXT (not bytes) with Base64-encoded data.
     
     Args:
         sender: Username sending the chunk
         file_id: File transfer ID
         offset: Byte offset of this chunk
-        chunk_data: Binary data chunk
+        chunk_data: Binary data chunk (will be Base64-encoded)
     
     Returns:
-        bytes: Complete message with binary data
+        str: Complete text-based message
     """
-    # Create JSON header with metadata
-    header_data = {
+    # Base64 encode the binary chunk
+    encoded_data = base64.b64encode(chunk_data).decode('ascii')
+    
+    # Create JSON payload
+    payload = {
         'file_id': file_id,
         'offset': offset,
-        'size': len(chunk_data)
+        'data': encoded_data,
+        'size': len(chunk_data)  # Original size before encoding
     }
     
-    # Format: FILE_DATA|sender|{json_metadata}|<binary_data><END>
-    header_text = f"{MSG_TYPE_FILE_DATA}|{sender}|{json.dumps(header_data)}|"
-    header_bytes = header_text.encode('utf-8')
-    
-    delimiter_bytes = MSG_DELIMITER.encode('utf-8')
-    
-    # Assemble: HEADER + BINARY_DATA + DELIMITER
-    return header_bytes + chunk_data + delimiter_bytes
+    # Return standard text message
+    return create_message(MSG_TYPE_FILE_DATA, sender, json.dumps(payload))
 
 
 def create_file_pause_message(sender: str, file_id: str, offset: int) -> str:
@@ -310,27 +309,6 @@ def parse_file_offer(content: str) -> dict:
         return json.loads(content)
     except:
         return {}
-
-
-def parse_file_data_header(raw_message: str) -> dict:
-    """
-    Parse FILE_DATA message header (before binary data).
-    
-    Args:
-        raw_message: Raw message string (may contain binary)
-    
-    Returns:
-        dict with keys: file_id, offset, size
-    """
-    try:
-        # Split by delimiter to isolate header
-        parts = raw_message.split('|', 2)
-        if len(parts) >= 3:
-            metadata_json = parts[2].split(MSG_DELIMITER)[0]
-            return json.loads(metadata_json)
-    except:
-        pass
-    return {}
 
 
 # ==================== MESSAGE PARSING ====================
@@ -484,7 +462,7 @@ class MessageBuffer:
 def test_protocol():
     """Test protocol functions."""
     print("=" * 60)
-    print("Protocol Module Test - Tier 2")
+    print("Protocol Module Test - Tier 2 (Base64)")
     print("=" * 60)
     
     # Test Tier 2 file transfer messages
@@ -507,10 +485,18 @@ def test_protocol():
     accept_msg = create_file_accept_message("bob", file_id)
     print(f"\nFILE_ACCEPT: {accept_msg[:80]}...")
     
-    # Test FILE_DATA
-    chunk = b"Binary data chunk here..."
+    # Test FILE_DATA (Base64)
+    chunk = b"Binary data chunk here... \x00\x01\x02\xff"
     data_msg = create_file_data_message("alice", file_id, 0, chunk)
-    print(f"\nFILE_DATA: {len(data_msg)} bytes (binary)")
+    print(f"\nFILE_DATA (Base64): {data_msg[:120]}...")
+    print(f"Message type: {type(data_msg)} (should be str)")
+    
+    # Verify it can be parsed
+    parsed_data = parse_message(data_msg)
+    if parsed_data:
+        payload = json.loads(parsed_data['content'])
+        decoded_chunk = base64.b64decode(payload['data'])
+        print(f"Decoded chunk matches: {decoded_chunk == chunk}")
     
     # Test FILE_PAUSE
     pause_msg = create_file_pause_message("bob", file_id, 4096)
@@ -529,7 +515,7 @@ def test_protocol():
     print(f"\nFILE_COMPLETE: {complete_msg[:80]}...")
     
     print("\n" + "=" * 60)
-    print("✓ Tier 2 Protocol Tests Completed")
+    print("✓ Tier 2 Protocol Tests Completed (Base64)")
     print("=" * 60)
 
 
