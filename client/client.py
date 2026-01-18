@@ -9,6 +9,7 @@ import time
 import json
 import uuid
 import queue
+import base64
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -164,7 +165,7 @@ class FileTransferManager:
                     transfer.start_sending()
     
     def handle_data_chunk(self, file_id: str, offset: int, chunk_data: bytes):
-        """Handle incoming FILE_DATA chunk."""
+        """Handle incoming FILE_DATA chunk (ALREADY Base64-decoded)."""
         with self.transfers_lock:
             if file_id in self.transfers:
                 transfer = self.transfers[file_id]
@@ -198,7 +199,7 @@ class FileTransferManager:
 
 
 class FileSendTransfer:
-    """Handles sending a single file."""
+    """Handles sending a single file with Base64 encoding."""
     
     def __init__(self, file_id, filepath, filename, filesize, socket, username, ui_queue):
         self.file_id = file_id
@@ -226,7 +227,7 @@ class FileSendTransfer:
                 self.send_thread.start()
     
     def _send_worker(self):
-        """Worker thread for sending file."""
+        """Worker thread for sending file with Base64 encoding."""
         try:
             with FileReader(self.filepath) as reader:
                 while not self.cancelled:
@@ -236,20 +237,21 @@ class FileSendTransfer:
                             time.sleep(0.1)
                             continue
                     
-                    # Read chunk
+                    # Read binary chunk
                     chunk = reader.read_chunk()
                     if not chunk:
                         break
                     
-                    # Send FILE_DATA
+                    # Create Base64-encoded FILE_DATA message (NOW RETURNS STRING)
                     data_msg = create_file_data_message(
                         self.username,
                         self.file_id,
                         self.offset,
-                        chunk
+                        chunk  # Binary bytes - will be Base64-encoded inside
                     )
                     
-                    encrypted = encrypt(data_msg)
+                    # Send as TEXT through normal pipeline
+                    encrypted = encrypt(data_msg.encode('utf-8'))
                     self.socket.sendall(encrypted)
                     
                     self.offset += len(chunk)
@@ -358,7 +360,7 @@ class FileSendTransfer:
 
 
 class FileReceiveTransfer:
-    """Handles receiving a single file."""
+    """Handles receiving a single file with Base64 decoding."""
     
     def __init__(self, file_id, sender, filename, filesize, socket, username, ui_queue):
         self.file_id = file_id
@@ -368,34 +370,34 @@ class FileReceiveTransfer:
         self.socket = socket
         self.username = username
         self.ui_queue = ui_queue
-        
+
         self.state = FILE_STATE_OFFERED
         self.offset = 0
-        self.file_writer = None
         self.lock = threading.Lock()
+
+        # Create download directory and file
+        download_dir = os.path.join(os.getcwd(), "downloads")
+        os.makedirs(download_dir, exist_ok=True)
+        self.file_path = os.path.join(download_dir, filename)
+
+        # Create empty file with full size
+        with open(self.file_path, 'wb') as f:
+            f.truncate(self.filesize)
+
     
     def accept(self):
         """Accept the file transfer."""
         with self.lock:
             if self.state != FILE_STATE_OFFERED:
                 return
-            
             self.state = FILE_STATE_ACCEPTED
-            
-            # Create file writer
-            self.file_writer = FileWriter(self.filename, self.filesize)
-            self.file_writer.open()
-        
-        # Send FILE_ACCEPT
+
         accept_msg = create_file_accept_message(self.username, self.file_id)
-        try:
-            encrypted = encrypt(accept_msg.encode('utf-8'))
-            self.socket.sendall(encrypted)
-        except Exception as e:
-            self.ui_queue.put(('error', f"Failed to send accept: {e}"))
-        
+        encrypted = encrypt(accept_msg.encode('utf-8'))
+        self.socket.sendall(encrypted)
+
         self.ui_queue.put(('receive_accepted', {'file_id': self.file_id}))
-    
+
     def reject(self, reason: str):
         """Reject the file transfer."""
         with self.lock:
@@ -412,24 +414,36 @@ class FileReceiveTransfer:
         self.ui_queue.put(('receive_rejected', {'file_id': self.file_id}))
     
     def write_chunk(self, offset: int, chunk_data: bytes):
-        """Write received chunk to file."""
+        """
+        Write received chunk to file.
+        
+        Args:
+            offset: Byte offset in file
+            chunk_data: ALREADY Base64-DECODED binary data
+        """
+        if not chunk_data:
+            return
+
         with self.lock:
             if self.state not in [FILE_STATE_ACCEPTED, FILE_STATE_TRANSFERRING]:
                 return
-            
+
             self.state = FILE_STATE_TRANSFERRING
-            
-            if self.file_writer:
-                self.file_writer.write_chunk(chunk_data)
-                self.offset = offset + len(chunk_data)
-                
-                # Update UI
-                progress = (self.offset / self.filesize) * 100
-                self.ui_queue.put(('receive_progress', {
-                    'file_id': self.file_id,
-                    'offset': self.offset,
-                    'progress': progress
-                }))
+
+            # Write to file at correct offset
+            with open(self.file_path, 'rb+') as f:
+                f.seek(offset)
+                f.write(chunk_data)
+
+            # Update progress
+            self.offset = max(self.offset, offset + len(chunk_data))
+
+            progress = (self.offset / self.filesize) * 100
+            self.ui_queue.put(('receive_progress', {
+                'file_id': self.file_id,
+                'offset': self.offset,
+                'progress': progress
+            }))
     
     def pause(self):
         """Pause receiving."""
@@ -463,8 +477,6 @@ class FileReceiveTransfer:
         """Cancel receiving."""
         with self.lock:
             self.state = FILE_STATE_CANCELLED
-            if self.file_writer:
-                self.file_writer.close()
         
         cancel_msg = create_file_cancel_message(self.username, self.file_id, "User cancelled")
         try:
@@ -491,22 +503,20 @@ class FileReceiveTransfer:
         """Handle cancel from sender."""
         with self.lock:
             self.state = FILE_STATE_CANCELLED
-            if self.file_writer:
-                self.file_writer.close()
         self.ui_queue.put(('receive_cancelled', {'file_id': self.file_id}))
     
     def complete(self):
-        """Complete the transfer."""
+        """Mark as completed."""
         with self.lock:
             self.state = FILE_STATE_COMPLETED
-            if self.file_writer:
-                filepath = self.file_writer.get_filepath()
-                self.file_writer.close()
-                
-                self.ui_queue.put(('receive_complete', {
-                    'file_id': self.file_id,
-                    'filepath': filepath
-                }))
+
+        self.ui_queue.put(('receive_complete', {
+            'file_id': self.file_id,
+            'filepath': self.file_path
+        }))
+
+
+# Continue in Part 2...
 
 
 # ==================== FILE TRANSFER UI PANEL ====================
@@ -1057,92 +1067,6 @@ class ChatClient:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
-    def handle_file_data(self, raw_bytes: bytes):
-        """
-        Xử lý FILE_DATA (NHỊ PHÂN)
-        FILE_DATA|sender|{json}|<binary><END>
-        """
-        try:
-            parts = raw_bytes.split(b'|', 3)
-
-            sender = parts[1].decode('utf-8')
-            meta = json.loads(parts[2].decode('utf-8'))
-
-            file_id = meta['file_id']
-            offset = meta['offset']
-            size = meta['size']
-
-            binary_with_end = parts[3]
-            chunk = binary_with_end[:-len(MSG_DELIMITER)]
-
-            # Ghi chunk vào file
-            self.file_transfer_manager.handle_data_chunk(
-                file_id, offset, chunk
-            )
-
-        except Exception as e:
-            print(f"Error handling FILE_DATA: {e}")
-
-
-    def handle_text(self, text: str):
-        """
-        Xử lý các message dạng TEXT / JSON (KHÔNG phải FILE_DATA)
-        """
-        self.message_buffer.add_data(text)
-
-        for raw_message in self.message_buffer.get_messages():
-            parsed = parse_message(raw_message)
-            if not parsed:
-                continue
-
-            msg_type = parsed['type']
-            sender = parsed['sender']
-            content = parsed['content']
-
-            # ===== FILE OFFER =====
-            if msg_type == MSG_TYPE_FILE_OFFER:
-                offer = json.loads(content)
-                self.file_transfer_manager.create_receive_transfer(
-                    file_id=offer['file_id'],
-                    sender=sender,
-                    filename=offer['filename'],
-                    filesize=offer['filesize']
-                )
-
-            # ===== FILE ACCEPT =====
-            elif msg_type == MSG_TYPE_FILE_ACCEPT:
-                data = json.loads(content)
-                self.file_transfer_manager.handle_accept(data['file_id'])
-
-            # ===== FILE PAUSE =====
-            elif msg_type == MSG_TYPE_FILE_PAUSE:
-                data = json.loads(content)
-                self.file_transfer_manager.handle_pause(
-                    data['file_id'], data['offset']
-                )
-
-            # ===== FILE RESUME =====
-            elif msg_type == MSG_TYPE_FILE_RESUME:
-                data = json.loads(content)
-                self.file_transfer_manager.handle_resume(
-                    data['file_id'], data['offset']
-                )
-
-            # ===== FILE CANCEL =====
-            elif msg_type == MSG_TYPE_FILE_CANCEL:
-                data = json.loads(content)
-                self.file_transfer_manager.handle_cancel(data['file_id'])
-
-            # ===== FILE COMPLETE =====
-            elif msg_type == MSG_TYPE_FILE_COMPLETE:
-                data = json.loads(content)
-                self.file_transfer_manager.handle_complete(data['file_id'])
-
-            # ===== TEXT / STATUS / BUZZ =====
-            else:
-                self.ui_queue.put(('message', parsed))
-
-
     def show_login(self) -> bool:
         """Show login dialog."""
         dialog = LoginDialog(self.root)
@@ -1509,7 +1433,7 @@ class ChatClient:
             self.root.destroy()
     
     def receive_messages(self):
-        """Receive messages thread."""
+        """Receive messages thread - ALL MESSAGES ARE TEXT."""
         while self.running:
             try:
                 encrypted_data = self.socket.recv(BUFFER_SIZE)
@@ -1519,24 +1443,16 @@ class ChatClient:
                     self.root.after(0, self.handle_disconnection)
                     break
                 
+                # Decrypt and decode as UTF-8 (ALL messages are text now)
                 decrypted_data = decrypt(encrypted_data)
-
-                if decrypted_data.startswith(b'FILE_DATA|'):
-                    try:
-                        raw_message = decrypted_data.decode('latin1')
-                        self.process_message(raw_message)
-                    except Exception as e:
-                        print(f"Error parsing FILE_DATA: {e}")
-                else:
-                    try:
-                        text_data = decrypted_data.decode('utf-8')
-                        self.message_buffer.add_data(text_data)
-
-                        for message in self.message_buffer.get_messages():
-                            self.process_message(message)
-                    except UnicodeDecodeError:
-                        pass
-
+                text_data = decrypted_data.decode('utf-8')
+                
+                # Add to message buffer
+                self.message_buffer.add_data(text_data)
+                
+                # Process complete messages
+                for message in self.message_buffer.get_messages():
+                    self.process_message(message)
             
             except Exception as e:
                 if self.running:
@@ -1545,7 +1461,7 @@ class ChatClient:
                     self.root.after(0, self.handle_disconnection)
                 break
     
-    def process_message(self, raw_message: str):
+    def process_message(self, raw_message: str, raw_bytes: bytes = None):
         """Process received message (Tier 1 + Tier 2)."""
         parsed = parse_message(raw_message)
         
@@ -1633,23 +1549,25 @@ class ChatClient:
             self.ui_queue.put(('file_rejected', {'file_id': file_id}))
         
         elif msg_type == MSG_TYPE_FILE_DATA:
-            # Extract binary chunk from message
             try:
-                # Parse header
-                parts = content.split('|', 1)
-                header = json.loads(parts[0])
-                file_id = header.get('file_id')
-                offset = header.get('offset')
-                size = header.get('size')
+                # Parse JSON payload
+                data_payload = json.loads(content)
                 
-                # Extract binary data (after last | before <END>)
-                raw_idx = raw_message.index('|', raw_message.index('|', raw_message.index('|') + 1) + 1) + 1
-                end_idx = raw_message.rindex(MSG_DELIMITER)
-                chunk_data = raw_message[raw_idx:end_idx].encode('latin1')  # Binary preservation
+                file_id = data_payload['file_id']
+                offset = data_payload['offset']
+                encoded_data = data_payload['data']
                 
-                self.file_transfer_manager.handle_data_chunk(file_id, offset, chunk_data)
+                # Base64 decode to get original binary chunk
+                chunk_data = base64.b64decode(encoded_data)
+                
+                # Write to file
+                self.file_transfer_manager.handle_data_chunk(
+                    file_id, offset, chunk_data
+                )
+            
             except Exception as e:
-                print(f"Error parsing FILE_DATA: {e}")
+                print(f"Error handling FILE_DATA: {e}")
+
         
         elif msg_type == MSG_TYPE_FILE_PAUSE:
             pause_data = json.loads(content)
