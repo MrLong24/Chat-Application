@@ -171,7 +171,10 @@ USER_DATABASE = {
     'bob': 'securepass',
     'charlie': 'mypass',
     'demo': 'demo',
-    'test': 'test'
+    'test': 'test',
+    'long': '123',
+    'phi': '123',
+    'duc': '123'
 }
 
 SESSION_TIMEOUT = 3600
