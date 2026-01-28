@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import (
     MESSAGE_ID_START, MSG_DELIMITER, MSG_TYPE_MESSAGE_DELIVERED, MSG_TYPE_MESSAGE_READ, 
     MSG_TYPE_MESSAGE_SENT, MSG_TYPE_STATUS_CHANGE, MSG_TYPE_STATUS_UPDATE, 
-    MSG_TYPE_TYPING_START, MSG_TYPE_TYPING_STOP, STATUS_ONLINE, 
+    MSG_TYPE_TYPING_START, MSG_TYPE_TYPING_STOP, STATUS_ONLINE, STATUS_BUSY, STATUS_OFFLINE,
     TCP_HOST, TCP_PORT, MAX_CLIENTS, BUFFER_SIZE,
     USER_DATABASE, MSG_TYPE_AUTH, MSG_TYPE_AUTH_OK, MSG_TYPE_AUTH_FAIL,
     # Tier 2: File transfer
@@ -26,7 +26,7 @@ from common.protocol import (
     create_text_message, create_user_list_message, create_error_message,
     MessageBuffer, MSG_TYPE_TEXT, MSG_TYPE_FILE, MSG_TYPE_BUZZ,
     MSG_TYPE_USER_JOIN, MSG_TYPE_USER_LEAVE, MSG_TYPE_FILE_CHUNK, 
-    parse_message_with_id, parse_file_offer
+    parse_message_with_id, parse_file_offer, create_file_cancel_message
 )
 from common.encryption import encrypt, decrypt
 
@@ -184,8 +184,8 @@ class ChatServer:
             welcome_msg = create_text_message("SERVER", welcome_text)
             self.send_to_client(username, welcome_msg)
             
-            # Send user list
-            self.send_user_list(username)
+            # Broadcast updated user list to all clients (including new user)
+            self.broadcast_user_list()
             
             # Main communication loop - ALL MESSAGES ARE TEXT NOW
             while self.running:
@@ -242,46 +242,36 @@ class ChatServer:
             parsed = parse_message(data)
             
             if not parsed or parsed['type'] != MSG_TYPE_AUTH:
-                error_msg = create_error_message("Invalid authentication format")
-                self.send_raw(client_socket, error_msg)
+                self.send_raw(client_socket, create_message(MSG_TYPE_AUTH_FAIL, "SERVER", "Invalid auth"))
                 return None
             
-            try:
-                credentials = json.loads(parsed['content'])
-                username = credentials.get('username', '')
-                password = credentials.get('password', '')
-            except:
-                error_msg = create_error_message("Invalid credentials format")
-                self.send_raw(client_socket, error_msg)
+            auth_data = json.loads(parsed['content'])
+            username = auth_data.get('username')
+            password = auth_data.get('password')
+            
+            if not username or not password:
+                self.send_raw(client_socket, create_message(MSG_TYPE_AUTH_FAIL, "SERVER", "Missing credentials"))
                 return None
             
             if username in USER_DATABASE and USER_DATABASE[username] == password:
                 with self.clients_lock:
                     if username in self.clients:
-                        error_msg = create_error_message("User already logged in")
-                        self.send_raw(client_socket, error_msg)
+                        self.send_raw(client_socket, create_message(MSG_TYPE_AUTH_FAIL, "SERVER", "User already online"))
                         return None
                 
-                success_msg = create_message(MSG_TYPE_AUTH_OK, "SERVER", "Authentication successful")
-                self.send_raw(client_socket, success_msg)
+                auth_ok = create_message(MSG_TYPE_AUTH_OK, "SERVER", "")
+                self.send_raw(client_socket, auth_ok)
                 return username
             else:
-                fail_msg = create_message(MSG_TYPE_AUTH_FAIL, "SERVER", "Invalid username or password")
-                self.send_raw(client_socket, fail_msg)
+                self.send_raw(client_socket, create_message(MSG_TYPE_AUTH_FAIL, "SERVER", "Invalid credentials"))
                 return None
         
-        except socket.timeout:
-            print(f"Authentication timeout for {client_address}")
-            return None
         except Exception as e:
-            print(f"Authentication error for {client_address}: {e}")
+            print(f"Auth error from {client_address}: {e}")
             return None
     
     def process_message(self, username: str, raw_message: str):
-        """
-        Process received message from client.
-        Tier 1 + Tier 2 (file transfer relay) - ALL TEXT-BASED.
-        """
+        """Process incoming message from client."""
         parsed = parse_message(raw_message)
         
         if not parsed:
@@ -290,97 +280,97 @@ class ChatServer:
         msg_type = parsed['type']
         content = parsed['content']
         
+        # Skip processing non-status messages if user is busy
+        if self.user_status.get(username, STATUS_ONLINE) != STATUS_ONLINE and msg_type != MSG_TYPE_STATUS_CHANGE:
+            return
+        
         # ===== TIER 1: TEXT MESSAGES =====
-        if msg_type == MSG_TYPE_MESSAGE_SENT or msg_type == MSG_TYPE_TEXT:
-            msg_id = self.get_next_message_id()
-            timestamp = datetime.now().isoformat()
+        if msg_type == MSG_TYPE_TEXT or msg_type == MSG_TYPE_MESSAGE_SENT:
+            # Parse with ID if present
+            msg_data = parse_message_with_id(content)
+            text = msg_data.get('text', content)
             
-            if msg_type == MSG_TYPE_MESSAGE_SENT:
-                try:
-                    msg_data = json.loads(content)
-                    text = msg_data.get('text', content)
-                except:
-                    text = content
-            else:
-                text = content
+            # Generate server ID
+            server_msg_id = self.get_next_message_id()
             
-            with self.clients_lock:
-                recipients = set(self.clients.keys()) - {username}
-            
-            self.pending_messages[msg_id] = {
-                'sender': username,
+            # Create relayed message
+            relayed_content = json.dumps({
                 'text': text,
-                'timestamp': timestamp,
-                'recipients': recipients.copy(),
-                'delivered': set(),
-                'read': set()
-            }
-            
-            msg_content = json.dumps({
-                'text': text,
-                'msg_id': msg_id,
-                'timestamp': timestamp
+                'msg_id': server_msg_id,
+                'timestamp': datetime.now().isoformat()
             })
-            broadcast_msg = create_message(MSG_TYPE_MESSAGE_DELIVERED, username, msg_content)
             
-            delivered_count = 0
-            with self.clients_lock:
-                for recipient, client_socket in self.clients.items():
-                    if recipient != username:
-                        try:
-                            encrypted = encrypt(broadcast_msg.encode('utf-8'))
-                            client_socket.sendall(encrypted)
-                            self.pending_messages[msg_id]['delivered'].add(recipient)
-                            delivered_count += 1
-                        except Exception as e:
-                            print(f"Failed to deliver to {recipient}: {e}")
+            relayed_msg = create_message(MSG_TYPE_TEXT, username, relayed_content)
             
-            delivery_ack = create_delivered_ack(msg_id, f"{delivered_count} recipients")
+            # Broadcast to others
+            self.broadcast_message(relayed_msg, exclude=username)
+            
+            # Send delivery ACK to sender
+            delivery_ack = create_delivered_ack(server_msg_id, "all")
             self.send_to_client(username, delivery_ack)
             
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username}: {text[:50]} [MSG_ID:{msg_id}]")
-        
-        # ===== TIER 1: TYPING =====
-        elif msg_type == MSG_TYPE_TYPING_START or msg_type == 'TYPING_START':
-            with self.clients_lock:
-                self.typing_users.add(username)
-            self.broadcast_message(raw_message, exclude=username)
-        
-        elif msg_type == MSG_TYPE_TYPING_STOP or msg_type == 'TYPING_STOP':
-            with self.clients_lock:
-                self.typing_users.discard(username)
-            self.broadcast_message(raw_message, exclude=username)
-        
-        # ===== TIER 1: STATUS =====
-        elif msg_type == MSG_TYPE_STATUS_CHANGE or msg_type == 'STATUS_CHANGE':
-            new_status = content
-            with self.clients_lock:
-                self.user_status[username] = new_status
-                if username in self.user_sessions:
-                    self.user_sessions[username]['status'] = new_status
-            
-            status_update = create_message(MSG_TYPE_STATUS_UPDATE, username, new_status)
-            self.broadcast_message(status_update)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} status → {new_status}")
-        
-        # ===== TIER 1: READ ACK =====
-        elif msg_type == MSG_TYPE_MESSAGE_READ or msg_type == 'MSG_READ':
-            try:
-                read_data = json.loads(content)
-                msg_id = read_data.get('msg_id')
-                
-                if msg_id and msg_id in self.pending_messages:
-                    self.pending_messages[msg_id]['read'].add(username)
-                    original_sender = self.pending_messages[msg_id]['sender']
-                    read_ack = create_read_ack(msg_id, username)
-                    self.send_to_client(original_sender, read_ack)
-            except:
-                pass
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username}: {text}")
         
         # ===== TIER 1: BUZZ =====
         elif msg_type == MSG_TYPE_BUZZ:
-            self.broadcast_message(raw_message, exclude=username)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} sent a BUZZ")
+            buzz_msg = create_message(MSG_TYPE_BUZZ, username, "")
+            self.broadcast_message(buzz_msg, exclude=username)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {username} sent BUZZ")
+        
+        # ===== TIER 1: TYPING INDICATORS =====
+        elif msg_type == MSG_TYPE_TYPING_START:
+            self.typing_users.add(username)
+            typing_msg = create_message(MSG_TYPE_TYPING_START, username, "")
+            self.broadcast_message(typing_msg, exclude=username)
+        
+        elif msg_type == MSG_TYPE_TYPING_STOP:
+            self.typing_users.discard(username)
+            typing_msg = create_message(MSG_TYPE_TYPING_STOP, username, "")
+            self.broadcast_message(typing_msg, exclude=username)
+        
+        # ===== TIER 1: STATUS CHANGE =====
+        elif msg_type == MSG_TYPE_STATUS_CHANGE:
+            new_status = content
+            old_status = self.user_status.get(username, STATUS_ONLINE)
+            if new_status in [STATUS_ONLINE, STATUS_BUSY]:
+                self.user_status[username] = new_status
+                if new_status == STATUS_BUSY:
+                    self.typing_users.discard(username)
+                    leave_text = f"{username} is busy, has left"
+                    leave_msg = create_message(MSG_TYPE_USER_LEAVE, "SERVER", leave_text)
+                    self.broadcast_message(leave_msg)
+                    # Cancel active file transfers
+                    with self.file_transfers_lock:
+                        to_cancel = [fid for fid, transfer in self.file_transfers.items()
+                                    if transfer['sender'] == username or transfer.get('receiver') == username]
+                        for file_id in to_cancel:
+                            transfer = self.file_transfers[file_id]
+                            sender = transfer['sender']
+                            receiver = transfer['receiver']
+                            cancel_msg = create_file_cancel_message("SERVER", file_id, "User busy")
+                            if sender == username and receiver:
+                                self.send_to_client(receiver, cancel_msg)
+                            elif receiver == username and sender:
+                                self.send_to_client(sender, cancel_msg)
+                            del self.file_transfers[file_id]
+                elif new_status == STATUS_ONLINE and old_status == STATUS_BUSY:
+                    return_text = f"{username} has returned"
+                    return_msg = create_message(MSG_TYPE_USER_JOIN, "SERVER", return_text)
+                    self.broadcast_message(return_msg)
+                status_msg = create_message(MSG_TYPE_STATUS_CHANGE, username, new_status)
+                self.broadcast_message(status_msg, exclude=username)
+                self.broadcast_user_list()
+        
+        # ===== TIER 1: READ ACK =====
+        elif msg_type == MSG_TYPE_MESSAGE_READ:
+            try:
+                read_data = json.loads(content)
+                msg_id = read_data.get('msg_id')
+                if msg_id:
+                    read_ack = create_read_ack(msg_id, username)
+                    self.broadcast_message(read_ack, exclude=username)
+            except:
+                pass
         
         # ===== TIER 2: FILE TRANSFER PROTOCOL (BASE64) =====
         
@@ -588,10 +578,12 @@ class ChatServer:
             self.broadcast_message(raw_message, exclude=username)
     
     def broadcast_message(self, message: str, exclude: str = None):
-        """Broadcast message to all connected clients."""
+        """Broadcast message to all connected clients who are online."""
         with self.clients_lock:
             for username, client_socket in list(self.clients.items()):
                 if username == exclude:
+                    continue
+                if self.user_status.get(username, STATUS_ONLINE) != STATUS_ONLINE:
                     continue
                 
                 try:
@@ -601,9 +593,9 @@ class ChatServer:
                     print(f"Error sending to {username}: {e}")
     
     def send_to_client(self, username: str, message: str):
-        """Send message to specific client."""
+        """Send message to specific client if they are online."""
         with self.clients_lock:
-            if username in self.clients:
+            if username in self.clients and self.user_status.get(username, STATUS_ONLINE) == STATUS_ONLINE:
                 try:
                     encrypted = encrypt(message.encode('utf-8'))
                     self.clients[username].sendall(encrypted)
@@ -623,16 +615,34 @@ class ChatServer:
         with self.clients_lock:
             user_data = []
             for user in self.clients.keys():
-                status = self.user_status.get(user, 'online')
-                user_data.append({
-                    'username': user,
-                    'status': status,
-                    'typing': user in self.typing_users
-                })
+                status = self.user_status.get(user, STATUS_ONLINE)
+                if status == STATUS_ONLINE:
+                    user_data.append({
+                        'username': user,
+                        'status': status,
+                        'typing': user in self.typing_users
+                    })
         
         user_list_json = json.dumps(user_data)
         user_list_msg = f"USER_LIST|SERVER|{user_list_json}<END>"
         self.send_to_client(username, user_list_msg)
+    
+    def broadcast_user_list(self):
+        """Broadcast updated user list to all connected clients."""
+        with self.clients_lock:
+            user_data = []
+            for user in self.clients.keys():
+                status = self.user_status.get(user, STATUS_ONLINE)
+                if status == STATUS_ONLINE:
+                    user_data.append({
+                        'username': user,
+                        'status': status,
+                        'typing': user in self.typing_users
+                    })
+        
+        user_list_json = json.dumps(user_data)
+        user_list_msg = f"USER_LIST|SERVER|{user_list_json}<END>"
+        self.broadcast_message(user_list_msg)
     
     def remove_client(self, username: str):
         """Remove client from active connections."""
@@ -642,7 +652,7 @@ class ChatServer:
             if username in self.user_sessions:
                 del self.user_sessions[username]
             if username in self.user_status:
-                self.user_status[username] = 'offline'
+                self.user_status[username] = STATUS_OFFLINE
             self.typing_users.discard(username)
         
         # Cancel any active file transfers
@@ -651,6 +661,9 @@ class ChatServer:
                         if transfer['sender'] == username or transfer.get('receiver') == username]
             for file_id in to_cancel:
                 del self.file_transfers[file_id]
+        
+        # Broadcast updated user list after removal
+        self.broadcast_user_list()
     
     def get_server_stats(self) -> dict:
         """Get server statistics."""
