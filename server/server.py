@@ -336,7 +336,7 @@ class ChatServer:
                 self.user_status[username] = new_status
                 if new_status == STATUS_BUSY:
                     self.typing_users.discard(username)
-                    leave_text = f"{username} is busy, has left"
+                    leave_text = f"{username} is busy, has"
                     leave_msg = create_message(MSG_TYPE_USER_LEAVE, "SERVER", leave_text)
                     self.broadcast_message(leave_msg)
                     # Cancel active file transfers
@@ -354,7 +354,7 @@ class ChatServer:
                                 self.send_to_client(sender, cancel_msg)
                             del self.file_transfers[file_id]
                 elif new_status == STATUS_ONLINE and old_status == STATUS_BUSY:
-                    return_text = f"{username} has returned"
+                    return_text = f"{username} has"
                     return_msg = create_message(MSG_TYPE_USER_JOIN, "SERVER", return_text)
                     self.broadcast_message(return_msg)
                 status_msg = create_message(MSG_TYPE_STATUS_CHANGE, username, new_status)
