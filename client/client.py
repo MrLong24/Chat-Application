@@ -1258,6 +1258,18 @@ class ChatClient:
         plus_btn.pack(side="left")
         plus_btn.bind("<Button-1>", lambda e: self.send_file())
         
+        emoji_btn = tk.Label(
+            input_frame,
+            text="😀",
+            font=(FONT_FAMILY, 14),
+            bg=INPUT_BG_COLOR,
+            fg=TEXT_SECONDARY,
+            cursor="hand2",
+            padx=10
+        )
+        emoji_btn.pack(side="left")
+        emoji_btn.bind("<Button-1>", lambda e: self.open_emoji_picker())
+        
         self.message_entry = tk.Entry(
             input_frame,
             bg=INPUT_BG_COLOR,
@@ -1318,6 +1330,46 @@ class ChatClient:
             self.file_transfer_panel.hide()
         else:
             self.file_transfer_panel.show()
+    
+    def open_emoji_picker(self):
+        """Open emoji picker window."""
+        picker = tk.Toplevel(self.root)
+        picker.title("Emojis")
+        picker.geometry("400x400")
+        picker.transient(self.root)
+        picker.grab_set()
+        
+        emojis = [
+            "😀", "😁", "😂", "🤣", "😃", "😄", "😅", "😆", "😉", "😊",
+            "😋", "😎", "😍", "😘", "🥰", "😗", "😙", "😚", "🙂", "🤗",
+            "🤩", "🤔", "🤨", "😐", "😑", "😶", "🙄", "😏", "😣", "😥",
+            "😮", "🤐", "😯", "😪", "😫", "😴", "😌", "😛", "😜", "😝",
+            "🤤", "😒", "😓", "😔", "😕", "🙃", "🤑", "😲", "🙁", "😖",
+            "😞", "😟", "😤", "😢", "😭", "😦", "😧", "😨", "😩", "🤯",
+            "😬", "😰", "😱", "🥵", "🥶", "😳", "🤪", "😵", "🥴", "😠",
+            "😡", "🤬", "😷", "🤒", "🤕", "🤢", "🤮", "🤧", "🥳", "🥺",
+            "🤠", "🤡", "🤥", "🤫", "🤭", "🧐", "🤓", "😈", "👿", "👹",
+            "👺", "💀", "👻", "👽", "👾", "🤖", "😺", "😸", "😹", "😻",
+            "😼", "😽", "🙀", "😿", "😾"
+        ]
+        
+        row = 0
+        col = 0
+        frame = tk.Frame(picker)
+        frame.pack(fill="both", expand=True)
+        
+        for emoji in emojis:
+            btn = tk.Button(frame, text=emoji, font=(FONT_FAMILY, 16), command=lambda e=emoji: self.insert_emoji(e, picker))
+            btn.grid(row=row, column=col, padx=2, pady=2)
+            col += 1
+            if col == 10:
+                col = 0
+                row += 1
+    
+    def insert_emoji(self, emoji, picker):
+        """Insert selected emoji into message entry."""
+        self.message_entry.insert(tk.INSERT, emoji)
+        picker.destroy()
     
     # Tier 1: Typing detection
     def on_key_press(self, event):
